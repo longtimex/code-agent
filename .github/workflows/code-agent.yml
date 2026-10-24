@@ -1,0 +1,27 @@
+name: Code Agent Review & Security Audit
+
+on:
+  pull_request:
+    branches: [ main, master, develop ]
+  push:
+    branches: [ main, master ]
+
+jobs:
+  code-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Run Code Analysis Agent
+        run: |
+          python3 -m code_agent.cli scan . --ci-github
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

@@ -1,0 +1,21 @@
+{
+  "ignore_paths": [
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "node_modules",
+    "dist",
+    "build",
+    ".pytest_cache",
+    ".tox"
+  ],
+  "max_complexity_threshold": 10,
+  "disabled_rules": [],
+  "severity_overrides": {},
+  "default_model": "gpt-4o",
+  "openai_base_url": "",
+  "openai_api_key": "",
+  "max_turns": 8,
+  "custom_secret_patterns": []
+}

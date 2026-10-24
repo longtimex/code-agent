@@ -1,0 +1,38 @@
+name: Build Windows Executable (.exe)
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+jobs:
+  build-windows-exe:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Build Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+
+      - name: Build Desktop Window App (.exe)
+        run: |
+          python build_exe.py --mode gui
+
+      - name: Build Command Line Tool (.exe)
+        run: |
+          python build_exe.py --mode cli
+
+      - name: Upload Windows Executable Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-agent-windows-binaries
+          path: dist/*.exe
