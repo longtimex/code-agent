@@ -37,7 +37,7 @@ def build(mode: str = "gui") -> None:
         cmd.extend([
             "--name", "code-agent-gui",
             "--noconsole",  # Hide terminal black window for pure GUI app
-            str(src_dir / "code_agent" / "gui_app.py"),
+            str(src_dir / "code_agent" / "gui_main.py"),
         ])
     else:
         cmd.extend([

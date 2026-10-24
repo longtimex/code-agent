@@ -26,6 +26,23 @@
 
 **仍未处理（建议后续）**：`SEC-009` 的替换目标 `tempfile.NamedTemporaryFile().name` 语义仍不理想（临时文件会立即被删除），建议改为 `tempfile.mkstemp()[1]`；`ast_parser.py` 的 `_format_pos_args` / `_format_kw_args` 与 `cli.py`↔`repl.py` 的 `print_step` 仍是重复代码（`debt` 命令 Top5 即为此）；`pyproject.toml` 仍缺 `license` / `classifiers` / dev 依赖，仓库仍无 LICENSE 文件。
 
+### 0.1 CI 首次运行失败复盘
+
+推送 `a75333b` 后两个 workflow 全部失败，通过 GitHub API 定位到是**两个不同的根因**：
+
+| 工作流 | 失败步骤 | 根因 | 修复 |
+|---|---|---|---|
+| Code Agent Review & Security Audit | `Run Code Analysis Agent`（单测是过的） | 门禁扫到了 `tests/` 里的**测试夹具**：`test_config.py:14`、`test_security_rules.py:36` 中的假密钥触发 SEC-101 → 判 CRITICAL → 门禁拦下自己 | 新增 `scan --exclude NAME` 选项；CI 改为 `scan . --ci-github --exclude tests --fail-on high` |
+| Build Windows Executable | `Run Unit Tests`（Windows 专属失败，Ubuntu 同步骤通过） | Windows runner 控制台代码页是 **cp1252**，`test_repl` 打印中文/emoji 抛 `UnicodeEncodeError` | 新增 `console.ensure_utf8_console()`，在 `cli.main` / `InteractiveREPL.__init__` / `launch_gui` 三个入口把 stdout/stderr 重配为 UTF-8（`errors="replace"` 兜底）；workflow 追加 `PYTHONIOENCODING: utf-8` |
+
+**顺带发现并修掉的三个潜在故障**（原 CI 从未跑到这些步骤，所以一直没暴露）：
+
+1. **打包入口的相对导入失效**：`build_exe.py` 直接把 `gui_app.py` / `__main__.py` 交给 PyInstaller 当脚本入口，而这两个文件用的是 `from .xxx import ...`。PyInstaller 以 `__main__` 身份执行入口脚本时无法解析包内相对导入，exe 会在启动时报 `ModuleNotFoundError`。→ `__main__.py` 改绝对导入，新增 `gui_main.py` 作为 GUI 入口。
+2. **`--noconsole` 下 GUI 启动即崩**：windowed 构建中 `sys.stdout is None`，`launch_gui` 里的 `print()` 会抛 `AttributeError`。→ 改为 `_emit()`，无控制台时静默跳过。
+3. **测试把钩子装进了真实仓库**：`PreCommitHook.install(repo_root=tmpdir)` 内部会 `GitTools.get_repo_root(tmpdir) or Path.cwd()`，当 tmpdir 不是 git 仓库时**回退到进程 cwd**，于是 `test_hook` 实际是在当前仓库的 `.git/hooks` 里装钩子。→ 显式传入 `repo_root` 时不再回退到 cwd。
+
+**验证方式**：`PYTHONIOENCODING=cp1252` 本地复现失败 → 修复后同条件 48/48 通过；真实安装 PyInstaller 6.22.3 打包两个 exe，`code-agent.exe --help` 与 `scan` 均正常运行、中文输出无异常。
+
 ---
 
 ## 1. 项目定位

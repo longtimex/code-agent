@@ -25,6 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PYTHONPATH: src
+      PYTHONIOENCODING: utf-8
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -40,7 +41,7 @@ jobs:
         run: python -m unittest discover -s tests -v
 
       - name: Run Code Analysis Agent
-        run: python -m code_agent scan . --ci-github --fail-on critical
+        run: python -m code_agent scan . --ci-github --exclude tests --fail-on high
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 """

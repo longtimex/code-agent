@@ -15,6 +15,7 @@ from .agent import AgentStep, CodeAnalysisAgent
 from .ast_parser import ASTParser
 from .call_graph import DependencyGraph
 from .config import AgentConfig
+from .console import ensure_utf8_console
 from .git_tools import GitTools
 from .llm_client import OfflineHeuristicEngine, OpenAICompatibleClient
 from .report_formatter import BOLD, CYAN, DIM, GREEN, RED, RESET, YELLOW, ReportFormatter
@@ -38,6 +39,7 @@ class InteractiveREPL:
         base_url: Optional[str] = None,
         api_key: Optional[str] = None,
     ) -> None:
+        ensure_utf8_console()
         self.workspace = Path(workspace_root) if workspace_root else (GitTools.get_repo_root() or Path.cwd())
         self.cfg = AgentConfig.load(self.workspace)
 

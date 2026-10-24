@@ -25,6 +25,7 @@ from .debt_estimator import DebtEstimator
 from .pr_reviewer import PRReviewer
 from .custom_rules import CustomRuleLoader
 from .ci_integration import CIIntegration
+from .console import ensure_utf8_console
 from .html_report import HTMLReportGenerator
 from .multi_lang import MultiLangScanner
 from .report_formatter import BOLD, CYAN, DIM, GREEN, MAGENTA, RED, RESET, YELLOW, ReportFormatter
@@ -80,6 +81,10 @@ def cmd_scan(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     config = AgentConfig.load()
+    for excluded in getattr(args, "exclude", None) or []:
+        if excluded not in config.ignore_paths:
+            config.ignore_paths.append(excluded)
+
     print(f"{BOLD}🔍 正在扫描目标: {target} ...{RESET}")
 
     findings = _collect_scan_findings(target, config, args)
@@ -521,6 +526,7 @@ def cmd_analyze(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    ensure_utf8_console()
     parser = argparse.ArgumentParser(
         prog="code-agent",
         description="基于 Python 的智能代码分析与安全审计 Agent",
@@ -538,6 +544,13 @@ def main() -> None:
     p_scan.add_argument("--ci-github", action="store_true", help="启用 GitHub Actions 注解输出格式")
     p_scan.add_argument("--no-cache", action="store_true", help="禁用增量缓存，强制全量重扫")
     p_scan.add_argument("--perf", action="store_true", help="同时执行静态性能瓶颈与热点分析")
+    p_scan.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="排除指定目录或文件名 (可重复，例如 --exclude tests)",
+    )
     p_scan.add_argument(
         "--fail-on",
         choices=["critical", "high", "medium", "low"],

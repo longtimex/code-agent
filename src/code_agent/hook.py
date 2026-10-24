@@ -42,10 +42,24 @@ exit 0
 class PreCommitHook:
     """Manages installation and removal of repository git pre-commit hooks."""
 
+    @staticmethod
+    def _hooks_dir(repo_root: Optional[Path | str] = None) -> Path:
+        """Resolves the `.git/hooks` directory for the given repository.
+
+        When an explicit `repo_root` is supplied it is never replaced by the
+        *process* cwd — doing so would silently install the hook into whichever
+        repository the caller happens to run from. A subdirectory of a repo is
+        still normalised to the repo root via git.
+        """
+        if repo_root is not None:
+            root = GitTools.get_repo_root(repo_root) or Path(repo_root)
+            return root.resolve() / ".git" / "hooks"
+        root = GitTools.get_repo_root() or Path.cwd()
+        return root / ".git" / "hooks"
+
     @classmethod
     def install(cls, repo_root: Optional[Path | str] = None) -> Path:
-        root = GitTools.get_repo_root(repo_root) or Path.cwd()
-        hooks_dir = root / ".git" / "hooks"
+        hooks_dir = cls._hooks_dir(repo_root)
         if not hooks_dir.is_dir():
             raise RuntimeError(f"Directory '{hooks_dir}' does not exist. Is this a Git repository?")
 
@@ -60,8 +74,7 @@ class PreCommitHook:
 
     @classmethod
     def uninstall(cls, repo_root: Optional[Path | str] = None) -> bool:
-        root = GitTools.get_repo_root(repo_root) or Path.cwd()
-        hook_file = root / ".git" / "hooks" / "pre-commit"
+        hook_file = cls._hooks_dir(repo_root) / "pre-commit"
         if hook_file.is_file():
             hook_file.unlink()
             return True

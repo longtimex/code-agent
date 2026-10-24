@@ -15,6 +15,7 @@ import time
 import webbrowser
 from typing import Optional
 
+from .console import ensure_utf8_console
 from .gui_server import start_server
 
 
@@ -51,17 +52,33 @@ def open_desktop_window(url: str) -> None:
     webbrowser.open(url)
 
 
+def _emit(message: str) -> None:
+    """Writes a status line only when a console is attached.
+
+    PyInstaller's `--noconsole` builds set `sys.stdout` to `None`, where a bare
+    `print()` would raise AttributeError and kill the app before the window opens.
+    """
+    stream = sys.stdout
+    if stream is None:
+        return
+    try:
+        print(message)
+    except (OSError, ValueError):
+        pass
+
+
 def launch_gui(port: Optional[int] = None) -> None:
+    ensure_utf8_console()
     selected_port = port or find_free_port()
     server = start_server(port=selected_port)
     url = f"http://127.0.0.1:{selected_port}"
 
-    print(f"\n==================================================================")
-    print(f"  🛡️ Code Analysis Agent - 桌面应用程序已启动")
-    print(f"  访问地址: {url}")
-    print(f"  正在打开本地桌面弹窗应用...")
-    print(f"  按 Ctrl+C 关闭程序")
-    print(f"==================================================================\n")
+    _emit("\n==================================================================")
+    _emit("  🛡️ Code Analysis Agent - 桌面应用程序已启动")
+    _emit(f"  访问地址: {url}")
+    _emit("  正在打开本地桌面弹窗应用...")
+    _emit("  按 Ctrl+C 关闭程序")
+    _emit("==================================================================\n")
 
     open_desktop_window(url)
 
@@ -69,5 +86,5 @@ def launch_gui(port: Optional[int] = None) -> None:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        print("\n桌面应用程序已退出。")
+        _emit("\n桌面应用程序已退出。")
         server.shutdown()
