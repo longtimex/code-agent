@@ -151,69 +151,83 @@ class TkinterDesktopApp:
 
     def _run_action(self) -> None:
         target_path = Path(self.path_entry.get().strip())
-        action_val = self.action_var.get()
-        # Handle tuple string if from combobox
-        if " " in action_val:
-            action = action_val.split()[0]
-        else:
-            action = action_val
-
-        self.text_output.delete("1.0", self.tk.END)
-        self.text_output.insert(self.tk.END, "⏳ 正在分析中，请稍候...\n\n")
-        self.root.update()
+        action = self._selected_action()
+        self._set_output("⏳ 正在分析中，请稍候...\n\n")
 
         try:
-            if "agent" in action:
-                cfg = AgentConfig.load()
-                api_key = cfg.openai_api_key or os.environ.get("OPENAI_API_KEY")
-                base_url = cfg.openai_base_url or os.environ.get("OPENAI_BASE_URL")
-                model = cfg.default_model or "gpt-4o"
-
-                if api_key:
-                    llm = OpenAICompatibleClient(api_key=api_key, base_url=base_url, model=model)
-                else:
-                    llm = OfflineHeuristicEngine(model=model)
-
-                agent = CodeAnalysisAgent(llm_client=llm)
-                res = agent.run(goal="全面审查代码安全漏洞、异常处理与性能缺陷", target_path=str(target_path))
-                result_text = res.final_response
-
-            elif "scan" in action:
-                findings = CodeRuleEngine.scan_directory(target_path) if target_path.is_dir() else CodeRuleEngine.scan_file(target_path)
-                out = [f"=== 静态安全与质量扫描结果 ===", f"目标: {target_path}", f"发现隐患总数: {len(findings)}\n"]
-                for i, f in enumerate(findings, start=1):
-                    out.append(f"#{i} [{f.severity}] {f.title} ({f.rule_id})")
-                    out.append(f"   位置: {f.file_path}:{f.line_number}")
-                    if f.snippet:
-                        out.append(f"   代码: {f.snippet}")
-                    out.append(f"   建议: {f.recommendation}\n")
-                result_text = "\n".join(out)
-
-            elif "debt" in action:
-                report = DebtEstimator.analyze(target_path)
-                result_text = (
-                    f"=== 代码可维护性指数与技术债评估 ===\n"
-                    f"可维护性评级 (MI): Grade {report.maintainability_grade} ({report.maintainability_index:.1f}/100)\n"
-                    f"分析行数 (LOC): {report.total_loc:,} 行 ({report.total_files} 个文件)\n"
-                    f"预估修复工时: {report.total_debt_hours:.1f} 小时 (共 {report.total_findings} 处发现)\n"
-                    f"重复代码块: {report.duplicates_count} 处\n"
-                )
-
-            elif "testgen" in action:
-                result_text = TestGenerator.generate_test_file(target_path, output_framework="pytest")
-
-            elif "review" in action:
-                result_text = PRReviewer.generate_review_comment(repo_root=target_path)
-
-            else:
-                result_text = "未知操作类型。"
-
-            self.text_output.delete("1.0", self.tk.END)
-            self.text_output.insert(self.tk.END, result_text)
-
+            result_text = self._dispatch_action(action, target_path)
         except Exception as e:
-            self.text_output.delete("1.0", self.tk.END)
-            self.text_output.insert(self.tk.END, f"❌ 执行出错: {str(e)}\n")
+            result_text = f"❌ 执行出错: {str(e)}\n"
+
+        self._set_output(result_text)
+
+    def _selected_action(self) -> str:
+        # Combobox entries may render as "value label", so keep the first token.
+        action_val = self.action_var.get()
+        return action_val.split()[0] if " " in action_val else action_val
+
+    def _set_output(self, text: str) -> None:
+        self.text_output.delete("1.0", self.tk.END)
+        self.text_output.insert(self.tk.END, text)
+        self.root.update()
+
+    def _dispatch_action(self, action: str, target_path: Path) -> str:
+        if "agent" in action:
+            return self._run_agent(target_path)
+        if "scan" in action:
+            return self._run_scan(target_path)
+        if "debt" in action:
+            return self._run_debt(target_path)
+        if "testgen" in action:
+            return TestGenerator.generate_test_file(target_path, output_framework="pytest")
+        if "review" in action:
+            return PRReviewer.generate_review_comment(repo_root=target_path)
+        return "未知操作类型。"
+
+    def _run_agent(self, target_path: Path) -> str:
+        cfg = AgentConfig.load()
+        api_key = cfg.openai_api_key or os.environ.get("OPENAI_API_KEY")
+        base_url = cfg.openai_base_url or os.environ.get("OPENAI_BASE_URL")
+        model = cfg.default_model or "gpt-4o"
+
+        if api_key:
+            llm = OpenAICompatibleClient(api_key=api_key, base_url=base_url, model=model)
+        else:
+            llm = OfflineHeuristicEngine(model=model)
+
+        agent = CodeAnalysisAgent(llm_client=llm)
+        res = agent.run(goal="全面审查代码安全漏洞、异常处理与性能缺陷", target_path=str(target_path))
+        return res.final_response
+
+    def _run_scan(self, target_path: Path) -> str:
+        if target_path.is_dir():
+            findings = CodeRuleEngine.scan_directory(target_path)
+        else:
+            findings = CodeRuleEngine.scan_file(target_path)
+
+        out = [
+            "=== 静态安全与质量扫描结果 ===",
+            f"目标: {target_path}",
+            f"发现隐患总数: {len(findings)}\n",
+        ]
+        for i, f in enumerate(findings, start=1):
+            out.append(f"#{i} [{f.severity}] {f.title} ({f.rule_id})")
+            out.append(f"   位置: {f.file_path}:{f.line_number}")
+            if f.snippet:
+                out.append(f"   代码: {f.snippet}")
+            out.append(f"   建议: {f.recommendation}\n")
+        return "\n".join(out)
+
+    @staticmethod
+    def _run_debt(target_path: Path) -> str:
+        report = DebtEstimator.analyze(target_path)
+        return (
+            f"=== 代码可维护性指数与技术债评估 ===\n"
+            f"可维护性评级 (MI): Grade {report.maintainability_grade} ({report.maintainability_index:.1f}/100)\n"
+            f"分析行数 (LOC): {report.total_loc:,} 行 ({report.total_files} 个文件)\n"
+            f"预估修复工时: {report.total_debt_hours:.1f} 小时 (共 {report.total_findings} 处发现)\n"
+            f"重复代码块: {report.duplicates_count} 处\n"
+        )
 
     def run(self) -> None:
         self.root.mainloop()

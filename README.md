@@ -98,6 +98,9 @@ PYTHONPATH=src python3 -m code_agent init-config \
   --model "deepseek-chat"
 ```
 
+> ⚠️ **安全提示**：`.code-agent.json` 会以**明文**保存 API Key，因此该文件已在 `.gitignore` 中排除，**切勿提交到仓库**。
+> 需要纳入版本管理的默认配置请使用 `.code-agent.example.json` 模板，密钥优先通过环境变量 `OPENAI_API_KEY` 注入。
+
 ### 4. 在交互式终端 REPL 中动态热切换
 在终端控制台（`code-agent chat`）内，无需重启即可通过斜杠指令切换：
 ```text
@@ -142,6 +145,9 @@ PYTHONPATH=src python3 -m code_agent scan . --sarif results.sarif
 
 # 挂载团队自定义规则
 PYTHONPATH=src python3 -m code_agent scan . --custom-rules custom_rules.json
+
+# 质量门禁：存在 HIGH 及以上隐患时以退出码 1 结束 (供 CI / pre-commit 使用)
+PYTHONPATH=src python3 -m code_agent scan . --fail-on high
 ```
 
 ### 6. 静态性能瓶颈分析与诊断
@@ -192,6 +198,7 @@ PYTHONPATH=src python3 -m code_agent testgen src/code_agent/patcher.py --framewo
 PYTHONPATH=src python3 -m code_agent install-hook
 PYTHONPATH=src python3 -m code_agent uninstall-hook
 ```
+钩子会在提交前执行 `review --ref HEAD --fail-on high`，一旦发现 HIGH 及以上隐患即以非零退出码中止提交。
 
 ---
 
@@ -199,6 +206,6 @@ PYTHONPATH=src python3 -m code_agent uninstall-hook
 
 运行全部 48 项单元测试：
 ```bash
-cd code-agent
+# 在项目根目录执行
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```

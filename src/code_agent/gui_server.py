@@ -357,8 +357,13 @@ DESKTOP_HTML = """<!DOCTYPE html>
         const resp = await fetch('/api/config');
         const data = await resp.json();
         if (data.base_url) document.getElementById('cfgBaseUrl').value = data.base_url;
-        if (data.api_key) document.getElementById('cfgApiKey').value = data.api_key;
         if (data.model) document.getElementById('cfgModel').value = data.model;
+        // The raw key is never sent to the browser; show a masked hint only.
+        const keyInput = document.getElementById('cfgApiKey');
+        keyInput.value = '';
+        keyInput.placeholder = data.has_api_key
+          ? `已保存 (${data.api_key_masked})，留空则不修改`
+          : 'sk-... (尚未配置)';
       } catch (e) {
         console.error("加载配置失败", e);
       }
@@ -370,11 +375,13 @@ DESKTOP_HTML = """<!DOCTYPE html>
       const model = document.getElementById('cfgModel').value.trim();
       const status = document.getElementById('settingsStatus');
       status.innerHTML = `<span style="color: var(--text-dim);">正在保存配置...</span>`;
+      const payload = {base_url: url, model: model};
+      if (key) payload.api_key = key;
       try {
         const resp = await fetch('/api/config', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({base_url: url, api_key: key, model: model})
+          body: JSON.stringify(payload)
         });
         const res = await resp.json();
         if (res.success) {
@@ -423,137 +430,169 @@ class GUIRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         pass  # Suppress default noisy console logs
 
+    def _send_json(self, payload: Dict[str, Any], status: int = 200) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path in ("/", "/index.html"):
+            body = DESKTOP_HTML.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(DESKTOP_HTML.encode("utf-8"))
+            self.wfile.write(body)
         elif parsed.path == "/api/config":
             cfg = AgentConfig.load()
             key = cfg.openai_api_key or os.environ.get("OPENAI_API_KEY", "")
             url = cfg.openai_base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
             model = cfg.default_model or "gpt-4o"
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(json.dumps({
+            # Never echo the raw credential back to the client: any local page
+            # that can reach this port would otherwise be able to read it.
+            if len(key) > 8:
+                masked = f"{key[:4]}****{key[-4:]}"
+            else:
+                masked = "****" if key else ""
+            self._send_json({
                 "base_url": url,
-                "api_key": key,
-                "model": model,
+                "api_key_masked": masked,
                 "has_api_key": bool(key),
-            }, ensure_ascii=False).encode("utf-8"))
+                "model": model,
+            })
         else:
             self.send_response(404)
             self.end_headers()
 
     def do_POST(self) -> None:
+        try:
+            payload = self._handle_post()
+        except Exception as exc:  # keep the UI alive instead of dropping the socket
+            self._send_json(
+                {"success": False, "output": "", "error": f"服务器内部错误: {exc}"},
+                status=500,
+            )
+            return
+        self._send_json(payload)
+
+    def _handle_post(self) -> Dict[str, Any]:
         parsed = urlparse(self.path)
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length).decode("utf-8")
         data = json.loads(body) if body else {}
 
-        resp_data: Dict[str, Any] = {}
+        handler = {
+            "/api/scan": self._api_scan,
+            "/api/config": self._api_save_config,
+            "/api/llm/test": self._api_llm_test,
+            "/api/agent": self._api_agent,
+            "/api/debt": self._api_debt,
+            "/api/testgen": self._api_testgen,
+            "/api/review": self._api_review,
+        }.get(parsed.path)
 
-        if parsed.path == "/api/scan":
-            target = Path(data.get("path", "."))
-            findings = CodeRuleEngine.scan_directory(target) if target.is_dir() else CodeRuleEngine.scan_file(target)
-            crit = sum(1 for f in findings if f.severity == "CRITICAL")
-            high = sum(1 for f in findings if f.severity == "HIGH")
-            med = sum(1 for f in findings if f.severity == "MEDIUM")
-            low = sum(1 for f in findings if f.severity in ("LOW", "INFO"))
+        if handler is None:
+            return {"success": False, "output": "", "error": f"未知接口: {parsed.path}"}
+        return handler(data)
 
-            lines = [
-                f"=== 静态代码安全与质量扫描结果 ===",
-                f"扫描目标: {target}",
-                f"发现总数: {len(findings)} 处 (CRITICAL: {crit}, HIGH: {high}, MEDIUM: {med}, LOW: {low})\n",
-            ]
-            for i, f in enumerate(findings, start=1):
-                lines.append(f"#{i} [{f.severity}] {f.title} ({f.rule_id})")
-                lines.append(f"   位置: {f.file_path}:{f.line_number}")
-                if f.snippet:
-                    lines.append(f"   代码: {f.snippet}")
-                lines.append(f"   建议: {f.recommendation}\n")
+    def _api_scan(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        target = Path(data.get("path", "."))
+        findings = CodeRuleEngine.scan_directory(target) if target.is_dir() else CodeRuleEngine.scan_file(target)
+        crit = sum(1 for f in findings if f.severity == "CRITICAL")
+        high = sum(1 for f in findings if f.severity == "HIGH")
+        med = sum(1 for f in findings if f.severity == "MEDIUM")
+        low = sum(1 for f in findings if f.severity in ("LOW", "INFO"))
 
-            resp_data = {"output": "\n".join(lines)}
+        lines = [
+            "=== 静态代码安全与质量扫描结果 ===",
+            f"扫描目标: {target}",
+            f"发现总数: {len(findings)} 处 (CRITICAL: {crit}, HIGH: {high}, MEDIUM: {med}, LOW: {low})\n",
+        ]
+        for i, f in enumerate(findings, start=1):
+            lines.append(f"#{i} [{f.severity}] {f.title} ({f.rule_id})")
+            lines.append(f"   位置: {f.file_path}:{f.line_number}")
+            if f.snippet:
+                lines.append(f"   代码: {f.snippet}")
+            lines.append(f"   建议: {f.recommendation}\n")
+        return {"output": "\n".join(lines)}
 
-        elif parsed.path == "/api/config":
-            cfg = AgentConfig.load()
-            if "base_url" in data:
-                cfg.openai_base_url = data["base_url"]
-                os.environ["OPENAI_BASE_URL"] = data["base_url"]
-            if "api_key" in data:
-                cfg.openai_api_key = data["api_key"]
-                os.environ["OPENAI_API_KEY"] = data["api_key"]
-            if "model" in data and data["model"]:
-                cfg.default_model = data["model"]
-            cfg.save()
-            resp_data = {"success": True, "message": "配置已成功保存至 .code-agent.json，并立即生效！"}
+    def _api_save_config(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        cfg = AgentConfig.load()
+        if "base_url" in data:
+            cfg.openai_base_url = data["base_url"]
+            os.environ["OPENAI_BASE_URL"] = data["base_url"]
+        # An empty field means "keep the stored key" — the UI never receives
+        # the real value, so blank must not wipe it.
+        if data.get("api_key"):
+            cfg.openai_api_key = data["api_key"]
+            os.environ["OPENAI_API_KEY"] = data["api_key"]
+        if data.get("model"):
+            cfg.default_model = data["model"]
+        cfg.save()
+        return {"success": True, "message": "配置已成功保存至 .code-agent.json，并立即生效！"}
 
-        elif parsed.path == "/api/llm/test":
-            cfg = AgentConfig.load()
-            base_url = data.get("base_url") or cfg.openai_base_url or os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1"
-            api_key = data.get("api_key") or cfg.openai_api_key or os.environ.get("OPENAI_API_KEY") or ""
-            model = data.get("model") or cfg.default_model or "gpt-4o"
+    def _api_llm_test(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        cfg = AgentConfig.load()
+        base_url = (
+            data.get("base_url") or cfg.openai_base_url
+            or os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1"
+        )
+        api_key = data.get("api_key") or cfg.openai_api_key or os.environ.get("OPENAI_API_KEY") or ""
+        model = data.get("model") or cfg.default_model or "gpt-4o"
 
-            if not api_key and "localhost" not in base_url and "127.0.0.1" not in base_url:
-                resp_data = {"success": False, "error": "未提供 API Key (本地服务如 Ollama 除外)"}
-            else:
-                client = OpenAICompatibleClient(api_key=api_key, base_url=base_url, model=model, timeout=10)
-                res = client.ping()
-                resp_data = res
+        is_local = "localhost" in base_url or "127.0.0.1" in base_url
+        if not api_key and not is_local:
+            return {"success": False, "error": "未提供 API Key (本地服务如 Ollama 除外)"}
 
-        elif parsed.path == "/api/agent":
-            target = data.get("path", ".")
-            goal = data.get("goal", "审计代码中的安全漏洞")
-            cfg = AgentConfig.load()
-            base_url = data.get("base_url") or cfg.openai_base_url or os.environ.get("OPENAI_BASE_URL")
-            api_key = data.get("api_key") or cfg.openai_api_key or os.environ.get("OPENAI_API_KEY")
-            model = data.get("model") or cfg.default_model or "gpt-4o"
+        client = OpenAICompatibleClient(api_key=api_key, base_url=base_url, model=model, timeout=10)
+        return client.ping()
 
-            if api_key:
-                llm = OpenAICompatibleClient(api_key=api_key, base_url=base_url, model=model)
-            else:
-                llm = OfflineHeuristicEngine(model=model)
+    def _api_agent(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        target = data.get("path", ".")
+        goal = data.get("goal", "审计代码中的安全漏洞")
+        cfg = AgentConfig.load()
+        base_url = data.get("base_url") or cfg.openai_base_url or os.environ.get("OPENAI_BASE_URL")
+        api_key = data.get("api_key") or cfg.openai_api_key or os.environ.get("OPENAI_API_KEY")
+        model = data.get("model") or cfg.default_model or "gpt-4o"
 
-            agent = CodeAnalysisAgent(llm_client=llm)
-            result = agent.run(goal=goal, target_path=target)
-            resp_data = {"output": result.final_response}
+        if api_key:
+            llm = OpenAICompatibleClient(api_key=api_key, base_url=base_url, model=model)
+        else:
+            llm = OfflineHeuristicEngine(model=model)
 
-        elif parsed.path == "/api/debt":
-            target = Path(data.get("path", "."))
-            report = DebtEstimator.analyze(target)
-            lines = [
-                f"=== 代码可维护性指数与技术债评估 ===",
-                f"可维护性评级 (MI): Grade {report.maintainability_grade} ({report.maintainability_index:.1f} / 100)",
-                f"总代码行数 (LOC): {report.total_loc:,} 行 ({report.total_files} 个文件)",
-                f"预估技术债偿还工时: {report.total_debt_hours:.1f} 小时 (共 {report.total_findings} 处发现)",
-                f"跨文件重复代码块: {report.duplicates_count} 处\n",
-            ]
-            if report.duplicates:
-                lines.append("--- 重复代码热点 ---")
-                for i, d in enumerate(report.duplicates[:5], start=1):
-                    lines.append(f"#{i} 连续 {d.line_count} 行重复 (出现在 {len(d.instances)} 个位置):")
-                    for f, s, e in d.instances[:2]:
-                        lines.append(f"   - {f}:{s}-{e}")
-            resp_data = {"output": "\n".join(lines)}
+        result = CodeAnalysisAgent(llm_client=llm).run(goal=goal, target_path=target)
+        return {"output": result.final_response}
 
-        elif parsed.path == "/api/testgen":
-            target = Path(data.get("path", ""))
-            fw = data.get("framework", "pytest")
-            code = TestGenerator.generate_test_file(target, output_framework=fw)
-            resp_data = {"output": code}
+    def _api_debt(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        target = Path(data.get("path", "."))
+        report = DebtEstimator.analyze(target)
+        lines = [
+            "=== 代码可维护性指数与技术债评估 ===",
+            f"可维护性评级 (MI): Grade {report.maintainability_grade} ({report.maintainability_index:.1f} / 100)",
+            f"总代码行数 (LOC): {report.total_loc:,} 行 ({report.total_files} 个文件)",
+            f"预估技术债偿还工时: {report.total_debt_hours:.1f} 小时 (共 {report.total_findings} 处发现)",
+            f"跨文件重复代码块: {report.duplicates_count} 处\n",
+        ]
+        if report.duplicates:
+            lines.append("--- 重复代码热点 ---")
+            for i, d in enumerate(report.duplicates[:5], start=1):
+                lines.append(f"#{i} 连续 {d.line_count} 行重复 (出现在 {len(d.instances)} 个位置):")
+                for f, s, e in d.instances[:2]:
+                    lines.append(f"   - {f}:{s}-{e}")
+        return {"output": "\n".join(lines)}
 
-        elif parsed.path == "/api/review":
-            ref = data.get("ref", "HEAD")
-            comment = PRReviewer.generate_review_comment(ref=ref)
-            resp_data = {"output": comment}
+    def _api_testgen(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        target = Path(data.get("path", ""))
+        code = TestGenerator.generate_test_file(target, output_framework=data.get("framework", "pytest"))
+        return {"output": code}
 
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(json.dumps(resp_data, ensure_ascii=False).encode("utf-8"))
+    def _api_review(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        comment = PRReviewer.generate_review_comment(ref=data.get("ref", "HEAD"))
+        return {"output": comment}
 
 
 def start_server(port: int = 8765) -> HTTPServer:

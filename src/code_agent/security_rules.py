@@ -272,9 +272,27 @@ class CodeRuleEngine:
     ) -> List[Finding]:
         cfg = config or AgentConfig()
         lines = content.splitlines()
-        findings: List[Finding] = []
 
-        # 1. Regex secrets check
+        findings: List[Finding] = []
+        findings.extend(cls._scan_secrets(lines, file_path, cfg))
+        findings.extend(cls._scan_ast(content, file_path, lines))
+        findings.extend(cls._scan_complexity(content, file_path, cfg))
+
+        if cfg.disabled_rules:
+            disabled = set(cfg.disabled_rules)
+            findings = [f for f in findings if f.rule_id not in disabled]
+
+        return findings
+
+    @classmethod
+    def _scan_secrets(
+        cls,
+        lines: List[str],
+        file_path: str,
+        cfg: AgentConfig,
+    ) -> List[Finding]:
+        """Regex pass: hardcoded credentials, cloud keys and private keys."""
+        findings: List[Finding] = []
         for lineno, line in enumerate(lines, start=1):
             stripped = line.strip()
             if stripped.startswith("#"):
@@ -292,49 +310,63 @@ class CodeRuleEngine:
                             recommendation=rec,
                         )
                     )
+        return findings
 
-        # 2. AST security scan
+    @classmethod
+    def _scan_ast(
+        cls,
+        content: str,
+        file_path: str,
+        lines: List[str],
+    ) -> List[Finding]:
+        """AST pass: injection, weak crypto, unsafe deserialization, error handling."""
         try:
             tree = ast.parse(content, filename=file_path)
-            visitor = SecurityScanner(file_path=file_path, source_lines=lines)
-            visitor.visit(tree)
-            findings.extend(visitor.findings)
         except SyntaxError as e:
-            findings.append(
+            lineno = e.lineno or 1
+            snippet = lines[lineno - 1] if lineno <= len(lines) else ""
+            return [
                 Finding(
                     rule_id="SYN-001",
                     title="Syntax Error",
                     severity="HIGH",
                     file_path=file_path,
-                    line_number=e.lineno or 1,
-                    snippet=lines[e.lineno - 1] if e.lineno and e.lineno <= len(lines) else "",
+                    line_number=lineno,
+                    snippet=snippet,
                     recommendation=f"Fix syntax error: {e.msg}",
                 )
-            )
+            ]
 
-        # 3. Cyclomatic complexity check
-        symbols = ASTParser.parse_source(content, filename=file_path)
+        visitor = SecurityScanner(file_path=file_path, source_lines=lines)
+        visitor.visit(tree)
+        return visitor.findings
+
+    @classmethod
+    def _scan_complexity(
+        cls,
+        content: str,
+        file_path: str,
+        cfg: AgentConfig,
+    ) -> List[Finding]:
+        """Flags functions whose McCabe complexity crosses the configured threshold."""
+        findings: List[Finding] = []
         threshold = cfg.max_complexity_threshold
-        for sym in symbols:
-            if sym.complexity >= threshold:
-                severity = "HIGH" if sym.complexity >= threshold + 5 else "MEDIUM"
-                findings.append(
-                    Finding(
-                        rule_id="PERF-001",
-                        title=f"High Cyclomatic Complexity ({sym.complexity}) in `{sym.name}`",
-                        severity=cfg.severity_overrides.get("PERF-001", severity),
-                        file_path=file_path,
-                        line_number=sym.start_line,
-                        snippet=sym.signature or sym.name,
-                        recommendation=f"Refactor `{sym.name}` into smaller helper functions to reduce branching logic.",
-                    )
+
+        for sym in ASTParser.parse_source(content, filename=file_path):
+            if sym.complexity < threshold:
+                continue
+            severity = "HIGH" if sym.complexity >= threshold + 5 else "MEDIUM"
+            findings.append(
+                Finding(
+                    rule_id="PERF-001",
+                    title=f"High Cyclomatic Complexity ({sym.complexity}) in `{sym.name}`",
+                    severity=cfg.severity_overrides.get("PERF-001", severity),
+                    file_path=file_path,
+                    line_number=sym.start_line,
+                    snippet=sym.signature or sym.name,
+                    recommendation=f"Refactor `{sym.name}` into smaller helper functions to reduce branching logic.",
                 )
-
-        # Filter out disabled rules
-        if cfg.disabled_rules:
-            disabled = set(cfg.disabled_rules)
-            findings = [f for f in findings if f.rule_id not in disabled]
-
+            )
         return findings
 
     @classmethod
@@ -385,7 +417,11 @@ class CodeRuleEngine:
         excludes = set(cfg.ignore_paths)
         from .git_tools import GitTools
         cache_root = GitTools.get_repo_root(root) or root
-        cache = IncrementalCache(cache_root) if use_cache else None
+        cache = (
+            IncrementalCache(cache_root, config_fingerprint=IncrementalCache.fingerprint_config(cfg))
+            if use_cache
+            else None
+        )
         findings: List[Finding] = []
 
         # Find all files

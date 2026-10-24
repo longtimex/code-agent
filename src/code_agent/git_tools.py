@@ -6,7 +6,9 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import List, Optional
+
+HUNK_PATTERN = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)")
 
 
 @dataclass
@@ -44,7 +46,7 @@ class FileDiff:
 class GitTools:
     """Provides git operations and diff parsing without external dependencies."""
 
-    HUNK_PATTERN = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)")
+    HUNK_PATTERN = HUNK_PATTERN
 
     @staticmethod
     def _run_git(args: List[str], cwd: Optional[Path | str] = None) -> str:
@@ -106,53 +108,77 @@ class GitTools:
         return cls._run_git(args, cwd=repo_path)
 
     @classmethod
-    def _create_hunk(cls, match: re.Match) -> DiffHunk:
-        return DiffHunk(
-            old_start=int(match.group(1)),
-            old_lines=int(match.group(2) or 1),
-            new_start=int(match.group(3)),
-            new_lines=int(match.group(4) or 1),
-            header=match.group(5).strip(),
-            lines=[],
-        )
-
-    @classmethod
     def parse_unified_diff(cls, diff_text: str) -> List[FileDiff]:
-        file_diffs: List[FileDiff] = []
-        current_diff: Optional[FileDiff] = None
-        current_hunk: Optional[DiffHunk] = None
-
-        def flush_hunk():
-            nonlocal current_hunk
-            if current_diff and current_hunk:
-                current_diff.hunks.append(current_hunk)
-                current_hunk = None
-
-        def flush_diff():
-            nonlocal current_diff
-            flush_hunk()
-            if current_diff:
-                file_diffs.append(current_diff)
-                current_diff = None
-
+        parser = _UnifiedDiffParser()
         for line in diff_text.splitlines():
-            if line.startswith("diff --git"):
-                flush_diff()
-                parts = line.split()
-                old_p = parts[2].removeprefix("a/") if len(parts) > 2 else ""
-                new_p = parts[3].removeprefix("b/") if len(parts) > 3 else ""
-                current_diff = FileDiff(old_path=old_p, new_path=new_p)
-            elif current_diff and line.startswith("new file mode"):
-                current_diff.is_new = True
-            elif current_diff and line.startswith("deleted file mode"):
-                current_diff.is_deleted = True
-            elif line.startswith("@@"):
-                flush_hunk()
-                m = cls.HUNK_PATTERN.match(line)
-                if m and current_diff:
-                    current_hunk = cls._create_hunk(m)
-            elif current_hunk is not None:
-                current_hunk.lines.append(line)
+            parser.feed(line)
+        return parser.finish()
 
-        flush_diff()
-        return file_diffs
+
+class _UnifiedDiffParser:
+    """Incremental unified-diff state machine.
+
+    Keeping the per-line branching in dedicated methods keeps the public
+    `parse_unified_diff` entry point trivially simple.
+    """
+
+    def __init__(self) -> None:
+        self.file_diffs: List[FileDiff] = []
+        self._current_diff: Optional[FileDiff] = None
+        self._current_hunk: Optional[DiffHunk] = None
+
+    def feed(self, line: str) -> None:
+        if line.startswith("diff --git"):
+            self._start_file(line)
+        elif self._mark_file_flags(line):
+            return
+        elif line.startswith("@@"):
+            self._start_hunk(line)
+        elif self._current_hunk is not None:
+            self._current_hunk.lines.append(line)
+
+    def finish(self) -> List[FileDiff]:
+        self._flush_diff()
+        return self.file_diffs
+
+    def _start_file(self, line: str) -> None:
+        self._flush_diff()
+        parts = line.split()
+        old_p = parts[2].removeprefix("a/") if len(parts) > 2 else ""
+        new_p = parts[3].removeprefix("b/") if len(parts) > 3 else ""
+        self._current_diff = FileDiff(old_path=old_p, new_path=new_p)
+
+    def _mark_file_flags(self, line: str) -> bool:
+        if self._current_diff is None:
+            return False
+        if line.startswith("new file mode"):
+            self._current_diff.is_new = True
+            return True
+        if line.startswith("deleted file mode"):
+            self._current_diff.is_deleted = True
+            return True
+        return False
+
+    def _start_hunk(self, line: str) -> None:
+        self._flush_hunk()
+        match = HUNK_PATTERN.match(line)
+        if match and self._current_diff:
+            self._current_hunk = DiffHunk(
+                old_start=int(match.group(1)),
+                old_lines=int(match.group(2) or 1),
+                new_start=int(match.group(3)),
+                new_lines=int(match.group(4) or 1),
+                header=match.group(5).strip(),
+                lines=[],
+            )
+
+    def _flush_hunk(self) -> None:
+        if self._current_diff and self._current_hunk:
+            self._current_diff.hunks.append(self._current_hunk)
+        self._current_hunk = None
+
+    def _flush_diff(self) -> None:
+        self._flush_hunk()
+        if self._current_diff:
+            self.file_diffs.append(self._current_diff)
+            self._current_diff = None

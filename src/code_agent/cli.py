@@ -48,6 +48,31 @@ def print_step(step: AgentStep) -> None:
         print(f"{DIM}工具返回预览:{RESET} {preview}")
 
 
+SEVERITY_ORDER = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+
+
+def enforce_fail_on(findings, fail_on: str | None) -> None:
+    """Exits with code 1 when any finding reaches the requested severity.
+
+    Without this, `scan` always returned 0 and neither CI pipelines nor the
+    pre-commit hook could ever block a commit.
+    """
+    if not fail_on:
+        return
+
+    threshold = SEVERITY_ORDER.index(fail_on.upper())
+    triggered = [
+        f for f in findings
+        if f.severity in SEVERITY_ORDER and SEVERITY_ORDER.index(f.severity) <= threshold
+    ]
+    if triggered:
+        print(
+            f"{RED}✖ 质量门禁未通过: 检测到 {len(triggered)} 处 >= {fail_on.upper()} 级别的隐患{RESET}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
 def cmd_scan(args: argparse.Namespace) -> None:
     target = Path(args.path)
     if not target.exists():
@@ -55,38 +80,55 @@ def cmd_scan(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     config = AgentConfig.load()
-    custom_rules = []
-    if getattr(args, "custom_rules", None):
-        custom_rules = CustomRuleLoader.load_from_file(args.custom_rules)
-
-    use_cache = not getattr(args, "no_cache", False)
     print(f"{BOLD}🔍 正在扫描目标: {target} ...{RESET}")
 
+    findings = _collect_scan_findings(target, config, args)
+    print(ReportFormatter.format_terminal_findings(findings))
+    _print_scan_summary(findings)
+    _export_scan_reports(findings, target, args)
+    enforce_fail_on(findings, getattr(args, "fail_on", None))
+
+
+def _collect_scan_findings(target: Path, config: AgentConfig, args: argparse.Namespace):
+    """Runs the rule engine plus the optional performance / custom-rule passes."""
+    use_cache = not getattr(args, "no_cache", False)
     if target.is_file():
         findings = CodeRuleEngine.scan_file(target, config=config)
     else:
         findings = CodeRuleEngine.scan_directory(target, config=config, use_cache=use_cache)
 
     if getattr(args, "perf", False):
-        if target.is_file():
-            perf_findings = PerformanceAdvisor.scan_file(target)
-        else:
-            perf_findings = PerformanceAdvisor.scan_directory(target)
-        findings.extend(perf_findings)
+        findings.extend(_scan_performance(target))
+
+    custom_rules = []
+    if getattr(args, "custom_rules", None):
+        custom_rules = CustomRuleLoader.load_from_file(args.custom_rules)
     if custom_rules:
-        # scan with custom rules
-        for fpath in (target.rglob("*") if target.is_dir() else [target]):
-            if fpath.is_file():
-                try:
-                    c = fpath.read_text(encoding="utf-8", errors="replace")
-                    findings.extend(CustomRuleLoader.scan_content(c, str(fpath), custom_rules))
-                except Exception:
-                    pass
+        findings.extend(_scan_custom_rules(target, custom_rules))
+
+    return findings
 
 
-    print(ReportFormatter.format_terminal_findings(findings))
+def _scan_performance(target: Path):
+    if target.is_file():
+        return PerformanceAdvisor.scan_file(target)
+    return PerformanceAdvisor.scan_directory(target)
 
-    # Print summary metrics
+
+def _scan_custom_rules(target: Path, custom_rules):
+    findings = []
+    for fpath in (target.rglob("*") if target.is_dir() else [target]):
+        if not fpath.is_file():
+            continue
+        try:
+            content = fpath.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        findings.extend(CustomRuleLoader.scan_content(content, str(fpath), custom_rules))
+    return findings
+
+
+def _print_scan_summary(findings) -> None:
     crit = sum(1 for f in findings if f.severity == "CRITICAL")
     high = sum(1 for f in findings if f.severity == "HIGH")
     med = sum(1 for f in findings if f.severity == "MEDIUM")
@@ -95,6 +137,8 @@ def cmd_scan(args: argparse.Namespace) -> None:
     print(f"{BOLD}📊 审计汇总统计:{RESET}")
     print(f"  {RED}● CRITICAL: {crit:<3}{RESET} {MAGENTA}● HIGH: {high:<3}{RESET} {YELLOW}● MEDIUM: {med:<3}{RESET} {CYAN}● LOW: {low:<3}{RESET} (总计: {len(findings)})")
 
+
+def _export_scan_reports(findings, target: Path, args: argparse.Namespace) -> None:
     if getattr(args, "ci_github", False):
         CIIntegration.emit_github_annotations(findings)
         CIIntegration.write_step_summary(findings)
@@ -227,29 +271,34 @@ def cmd_docgen(args: argparse.Namespace) -> None:
 
     if gen_arch:
         arch_doc = DocGenerator.generate_architecture_doc(target if target.is_dir() else target.parent)
-        if out_dir:
-            if out_dir.suffix == ".md":
-                out_path = out_dir
-            else:
-                out_dir.mkdir(parents=True, exist_ok=True)
-                out_path = out_dir / "ARCHITECTURE.md"
-            out_path.write_text(arch_doc, encoding="utf-8")
-            print(f"{GREEN}✔ 架构设计文档已生成至: {out_path}{RESET}")
-        else:
-            print(f"{BOLD}=== ARCHITECTURE.md ==={RESET}\n{arch_doc}\n")
+        _emit_doc(
+            arch_doc, out_dir, "ARCHITECTURE.md", "架构设计文档",
+            allow_file_target=not gen_api,
+        )
 
     if gen_api:
         api_doc = DocGenerator.generate_api_doc(target)
-        if out_dir:
-            if out_dir.suffix == ".md" and not gen_arch:
-                out_path = out_dir
-            else:
-                out_dir.mkdir(parents=True, exist_ok=True)
-                out_path = out_dir / "API.md"
-            out_path.write_text(api_doc, encoding="utf-8")
-            print(f"{GREEN}✔ API 接口参考文档已生成至: {out_path}{RESET}")
-        else:
-            print(f"{BOLD}=== API.md ==={RESET}\n{api_doc}\n")
+        _emit_doc(
+            api_doc, out_dir, "API.md", "API 接口参考文档",
+            allow_file_target=not gen_arch,
+        )
+
+
+def _emit_doc(content: str, out_dir: Path | None, filename: str, label: str, allow_file_target: bool) -> None:
+    """Prints the document, or writes it to a directory / explicit .md file path."""
+    if out_dir is None:
+        print(f"{BOLD}=== {filename} ==={RESET}\n{content}\n")
+        return
+
+    if allow_file_target and out_dir.suffix == ".md":
+        out_dir.write_text(content, encoding="utf-8")
+        print(f"{GREEN}✔ {label}已生成至: {out_dir}{RESET}")
+        return
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / filename
+    out_path.write_text(content, encoding="utf-8")
+    print(f"{GREEN}✔ {label}已生成至: {out_path}{RESET}")
 
 
 def cmd_license(args: argparse.Namespace) -> None:
@@ -433,6 +482,8 @@ def cmd_review(args: argparse.Namespace) -> None:
 
     print(ReportFormatter.format_terminal_findings(all_findings))
 
+    enforce_fail_on(all_findings, getattr(args, "fail_on", None))
+
 
 def cmd_analyze(args: argparse.Namespace) -> None:
     target = Path(args.path)
@@ -487,6 +538,12 @@ def main() -> None:
     p_scan.add_argument("--ci-github", action="store_true", help="启用 GitHub Actions 注解输出格式")
     p_scan.add_argument("--no-cache", action="store_true", help="禁用增量缓存，强制全量重扫")
     p_scan.add_argument("--perf", action="store_true", help="同时执行静态性能瓶颈与热点分析")
+    p_scan.add_argument(
+        "--fail-on",
+        choices=["critical", "high", "medium", "low"],
+        default=None,
+        help="质量门禁: 存在不低于该级别的隐患时以退出码 1 结束 (供 CI / pre-commit 使用)",
+    )
 
     # outline
     p_outline = subparsers.add_parser("outline", help="提取 Python 代码的 AST 骨架与函数签名")
@@ -559,6 +616,12 @@ def main() -> None:
     p_review = subparsers.add_parser("review", help="审查 Git 变更 (Diff Review)")
     p_review.add_argument("--ref", default="HEAD", help="Git 目标比较引用 (默认 HEAD)")
     p_review.add_argument("--pr", action="store_true", help="输出 GitHub PR 格式的 Markdown 评审评论")
+    p_review.add_argument(
+        "--fail-on",
+        choices=["critical", "high", "medium", "low"],
+        default=None,
+        help="质量门禁: 存在不低于该级别的隐患时以退出码 1 结束 (供 CI / pre-commit 使用)",
+    )
 
     # analyze
     p_analyze = subparsers.add_parser("analyze", help="运行多轮 ReAct 思考与工具调用的 Agent")

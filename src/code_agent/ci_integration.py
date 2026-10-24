@@ -23,6 +23,8 @@ on:
 jobs:
   code-audit:
     runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: src
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -34,9 +36,11 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Run Unit Tests
+        run: python -m unittest discover -s tests -v
+
       - name: Run Code Analysis Agent
-        run: |
-          python3 -m code_agent.cli scan . --ci-github
+        run: python -m code_agent scan . --ci-github --fail-on critical
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 """

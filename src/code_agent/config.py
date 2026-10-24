@@ -1,7 +1,7 @@
 """Project Configuration Management Module.
 
-Supports loading and saving `.code-agent.json` or `.code-agent.yaml` configs
-for custom ignore paths, rule severities, and complexity thresholds.
+Supports loading and saving the `.code-agent.json` config file for custom ignore
+paths, rule severities, complexity thresholds and LLM endpoint settings.
 """
 
 from __future__ import annotations

@@ -28,7 +28,10 @@ class DependencyGraph:
     """Builds and analyzes module dependencies and symbol relationships."""
 
     def __init__(self, root_dir: Optional[Path | str] = None) -> None:
-        self.root_dir = Path(root_dir) if root_dir else Path.cwd()
+        # Resolve up-front: Windows 8.3 short paths (e.g. `OVERGA~1`) expand to
+        # long paths on `.resolve()`, so an unresolved root_dir would make every
+        # `os.path.relpath()` in get_blast_radius() produce bogus `../..` keys.
+        self.root_dir = Path(root_dir).resolve() if root_dir else Path.cwd().resolve()
         # file -> set of imported files (relative paths)
         self.dependencies: Dict[str, Set[str]] = defaultdict(set)
         # file -> set of files importing this file

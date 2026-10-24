@@ -9,7 +9,15 @@ wheels/
 # Virtual environments
 .venv
 
+# Local agent config stores a plaintext API key — never commit it.
+# Copy .code-agent.example.json to .code-agent.json instead.
+.code-agent.json
+.code-agent.yaml
+
 .code-agent-cache.json
 report.html
 *.bak
 *.sarif
+
+# Local AI workspace data
+.workbuddy-ai/
